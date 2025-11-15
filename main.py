@@ -1,84 +1,72 @@
-import time
-import hmac
 import hashlib
-import base64
+import hmac
 import json
-import os
+import time
 import requests
+import os
 
-APP_KEY = os.environ["APP_KEY"]
-APP_SECRET = os.environ["APP_SECRET"]
-DEVICE_SN = os.environ["DEVICE_SN"]
-TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+APP_KEY = os.getenv("APP_KEY")
+APP_SECRET = os.getenv("APP_SECRET")
+DEVICE_SN = os.getenv("DEVICE_SN")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-def sign(timestamp):
-    message = APP_KEY + str(timestamp)
-    digest = hmac.new(
-        APP_SECRET.encode("utf-8"),
-        msg=message.encode("utf-8"),
-        digestmod=hashlib.sha256
-    ).digest()
-    return base64.b64encode(digest).decode()
+API_URL = "https://api.ecoflow.com/iot-open/sign/device/queryDeviceQuota"
 
-def get_ecoflow_status():
-    # спробуй з api-e.ecoflow.com, якщо основний не працює
-    url = "https://api.ecoflow.com/iot-open/sign/device/quota/all"
-    print("DEBUG: запит URL =", url)
-    ts = int(time.time() * 1000)
-    headers = {
+
+def make_signature(params, app_secret):
+    sorted_params = sorted(params.items())
+    data = "".join(f"{k}{v}" for k, v in sorted_params)
+    signature = hmac.new(
+        app_secret.encode("utf-8"),
+        data.encode("utf-8"),
+        hashlib.sha256
+    ).hexdigest()
+    return signature
+
+
+def query_device_quota():
+    timestamp = int(time.time() * 1000)
+
+    params = {
         "appKey": APP_KEY,
-        "timestamp": str(ts),
-        "sign": sign(ts),
-        "Content-Type": "application/json",
-    }
-    payload = {
         "sn": DEVICE_SN,
-        "params": ["soc", "wattsInSum", "wattsOutSum"]
+        "timestamp": timestamp
     }
-    response = requests.post(url, headers=headers, json=payload)
-    print("DEBUG: статус:", response.status_code, "відповідь:", response.text)
+
+    signature = make_signature(params, APP_SECRET)
+    params["sign"] = signature
+
+    headers = {"Content-Type": "application/json"}
+
+    response = requests.post(API_URL, headers=headers, json=params)
     response.raise_for_status()
+
     return response.json()
 
-def send_telegram(text: str):
+
+def send_telegram(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    requests.post(url, json={
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text
-    })
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
+    requests.post(url, json=payload)
 
-def main_loop():
-    last_state = None
-    while True:
-        try:
-            data = get_ecoflow_status()
-            quota = data["data"]["quota"]
-            soc = quota.get("soc")
-            watts_in = quota.get("wattsInSum", 0)
-            watts_out = quota.get("wattsOutSum", 0)
 
-            if watts_in > 30:
-                state = "charging"
-            elif watts_out > 30:
-                state = "discharging"
-            else:
-                state = "idle"
+def main():
+    try:
+        data = query_device_quota()
 
-            if state != last_state:
-                send_telegram(
-                    f"🔔 EcoFlow Delta 2 Max:\n"
-                    f"Стан: {state}\n"
-                    f"🔋 SOC: {soc}%\n"
-                    f"⚡ Вхід: +{watts_in} Вт\n"
-                    f"⚡ Вихід: -{watts_out} Вт"
-                )
-                last_state = state
+        if data.get("code") != "0":
+            send_telegram(f"❗️ Помилка від EcoFlow: {data}")
+            return
 
-        except Exception as e:
-            send_telegram(f"❗️ Помилка моніторингу: {e}")
+        quota = data["data"]
+        soc = quota.get("soc")
 
-        time.sleep(60)
+        send_telegram(f"🔋 SOC: {soc}%")
+
+    except Exception as e:
+        send_telegram(f"❗️ Помилка моніторингу: {e}")
+
 
 if __name__ == "__main__":
-    main_loop()
+    main()
